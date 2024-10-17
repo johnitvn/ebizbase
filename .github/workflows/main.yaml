@@ -43,18 +43,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/setup-git-bot-user
-      - name: Close related issues
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
-        run: |
-          commits=$(git log --format='%s' ${{ github.event.pull_request.merge_commit_sha }}~1..${{ github.event.pull_request.merge_commit_sha }})
-          for commit in $commits; do
-            if [[ $commit =~ Fix #[0-9]+ ]]; then
-              issue_id=${BASH_REMATCH[0]##* }
-              echo "Closing issue #${issue_id}"
-              gh issue close $issue_id --comment "This issue is closed by the merge of PR #${{ github.event.pull_request.number }}"
-            fi
-          done
       - name: Prepare for next release
         shell: bash
         env:
