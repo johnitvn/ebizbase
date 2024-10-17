@@ -5,5 +5,6 @@
     "production": ["default"],
     "sharedGlobals": []
   },
-  "plugins": []
+  "plugins": [],
+  "nxCloudId": "6710bb770486118c4625a03a"
 }
