@@ -46,7 +46,7 @@ jobs:
       - name: Prepare for next release
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN}}
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
         run: |
           git fetch --prune
 
