@@ -1,0 +1,156 @@
+name: CI/CD
+description: Continuous integration/continuous delivery & deployment pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches:
+      - main
+      - dev
+
+jobs:
+
+  intergration:
+    if: github.event.pull_request.state != 'closed' &&  startsWith(github.event.pull_request.head.ref, 'release') == false
+    runs-on: "ubuntu-latest"
+    concurrency:
+      group: intergration-${{ github.event.pull_request.head.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node
+        with:
+          dependencies: true
+      - uses: ./.github/actions/nx
+        if: github.event.pull_request.base.ref == 'main'
+        with:
+          target: lint* test* build* container*
+      - uses: ./.github/actions/nx
+        if: github.event.pull_request.base.ref != 'main'
+        with:
+          base-branch: ${{ github.event.pull_request.base.ref }}
+          target: lint* test* build* container*
+
+  prerelease:
+    if: >
+      startsWith(github.event.pull_request.head.ref, 'release/') != true
+      && github.event.pull_request.merged == true
+    concurrency:
+      group: prepare-prerelease-${{ github.event.pull_request.head.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-git-bot-user
+      - name: Close related issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
+        run: |
+          commits=$(git log --format='%s' ${{ github.event.pull_request.merge_commit_sha }}~1..${{ github.event.pull_request.merge_commit_sha }})
+          for commit in $commits; do
+            if [[ $commit =~ Fix #[0-9]+ ]]; then
+              issue_id=${BASH_REMATCH[0]##* }
+              echo "Closing issue #${issue_id}"
+              gh issue close $issue_id --comment "This issue is closed by the merge of PR #${{ github.event.pull_request.number }}"
+            fi
+          done
+      - name: Prepare for next release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN}}
+        run: |
+          git fetch --prune
+
+          # Close current release pull requests and delete release branch
+          PRS=$(gh pr list --state open --base main --head release/${{ github.base_ref }} --json number -q '.[].number')
+          if [ $? -ne 0 ]; then
+            echo "Error: Failed to list pull requests for branch 'release/${{ github.base_ref }}'"
+            exit 1
+          fi
+
+          for PR in $PRS; do
+            gh pr close $PR -d -c "This pull request for this release no longer needed. Please refer to the latest pull request."
+            if [ $? -ne 0 ]; then
+              echo "Error: Failed to close pull request #$PR"
+              exit 1
+            fi
+          done
+
+          if git show-ref --verify --quiet "refs/heads/release/${{ github.base_ref }}"; then
+            git push origin --delete release/${{ github.base_ref }}
+          fi
+
+          pnpm install -g standard-version conventional-changelog-cli
+
+          if [ "${{ github.base_ref }}" == "main" ]; then
+            npx standard-version --skip.tag --no-verify
+          else
+            npx standard-version --skip.tag --no-verify --prerelease next
+          fi
+          git checkout -b release/${{ github.base_ref }}
+          git push --no-verify origin release/${{ github.base_ref }}
+
+          version=$(jq -r '.version' package.json)
+          title="chore(release): release v$version"
+          body="# I'm preparing for the next release! \n\n"
+          body+="$(npx conventional-changelog-cli -u)\n\n"
+          body+="This pull request is automatically created by the CI/CD pipeline. Please refer to the latest pull request for the latest changes."
+          echo -e "$body" > pull-request.md
+          gh pr create --no-maintainer-edit --title "$title" --body-file pull-request.md --base ${{ github.base_ref }} --head release/${{ github.base_ref }}
+
+  release:
+    if: >
+      startsWith(github.event.pull_request.head.ref, 'release/') == true
+      && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-git-bot-user
+      - name: Create a release
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN}}
+        run: |
+          pnpm install -g conventional-changelog-cli
+          version=$(jq -r '.version' package.json)
+          gh release create "v${version}" --title "v${version}" --notes "$(npx conventional-changelog-cli -u)"
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Login to Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      - uses: ./.github/actions/setup-node
+        with:
+          dependencies: true
+          docker-buildx: true
+      - name: Build Docker Image & Publish
+        run: npx nx run-many -t container -c production
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set deployment status to "in_progress"
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
+        run: gh api repos/${{ github.repository }}/deployments -f state=in_progress
+
+      - name: Deploy to server
+        shell: bash
+        run: echo "Deploying to server not yet config" && exit 1
+
+      - name: Set deployment status to "success"
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
+        run: gh api repos/${{ github.repository }}/deployments -f state=success
+
+      - name: Set deployment status to "failure"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
+        run: gh api repos/${{ github.repository }}/deployments -f state=failure

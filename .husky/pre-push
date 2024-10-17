@@ -1,0 +1,8 @@
+echo "Running pre-push hook..."
+
+while read local_ref local_sha remote_ref remote_sha
+do
+  branch_name=$(echo $remote_ref | sed 's|refs/heads/||')
+done
+
+npx nx run-many -t lint test build container e2e
